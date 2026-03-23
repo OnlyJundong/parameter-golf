@@ -27,6 +27,14 @@ try:
 except ImportError:
     _COMPRESSOR = "zlib"
 
+# Auto-detect GQA support (PyTorch 2.5+)
+_HAS_GQA = False
+try:
+    import inspect
+    _HAS_GQA = "enable_gqa" in inspect.signature(F.scaled_dot_product_attention).parameters
+except Exception:
+    pass
+
 import numpy as np
 import sentencepiece as spm
 import torch
@@ -652,13 +660,18 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        n_rep = self.num_heads // self.num_kv_heads
-        if n_rep > 1:
-            k = k.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(bsz, -1, seqlen, self.head_dim)
-            v = v.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(bsz, -1, seqlen, self.head_dim)
-        y = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, is_causal=True,
-        )
+        if _HAS_GQA and self.num_kv_heads != self.num_heads:
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, is_causal=True, enable_gqa=True,
+            )
+        else:
+            n_rep = self.num_heads // self.num_kv_heads
+            if n_rep > 1:
+                k = k.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(bsz, -1, seqlen, self.head_dim)
+                v = v.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(bsz, -1, seqlen, self.head_dim)
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, is_causal=True,
+            )
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -791,7 +804,6 @@ class DGAttention(nn.Module):
         self.proj._zero_init = True
         # Learned mixing: how much differential vs raw per head
         self.beta = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))   # raw vs diff mix
-        self.gamma = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))  # local vs global baseline
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.d_head_dim, base=rope_base)
 
@@ -806,16 +818,11 @@ class DGAttention(nn.Module):
         dq = apply_rotary_emb(dq, cos, sin)
         dk = apply_rotary_emb(dk, cos, sin)
         dq = dq * self.q_gain.to(dtype=dq.dtype)[None, :, None, None]
-        # Blended baseline: local (previous token) + global (cumsum mean)
-        # Like video compression: diff against previous frame, not average of all frames
-        prev_token = torch.cat([torch.zeros_like(x[:, :1]), x[:, :-1]], dim=1)
+        # Causal mean baseline via parallel cumsum
         prefix = x.cumsum(dim=1)
         counts = torch.arange(1, seqlen + 1, device=x.device, dtype=x.dtype).view(1, -1, 1)
         mean_inclusive = prefix / counts
-        global_mean = torch.cat([torch.zeros_like(mean_inclusive[:, :1]), mean_inclusive[:, :-1]], dim=1)
-        # Learned blend: γ controls local vs global emphasis
-        g = torch.sigmoid(self.gamma.to(dtype=x.dtype))
-        baseline = g * prev_token + (1 - g) * global_mean
+        baseline = torch.cat([torch.zeros_like(mean_inclusive[:, :1]), mean_inclusive[:, :-1]], dim=1)
         # Hybrid payload: mix differential novelty with raw content
         mix = torch.sigmoid(self.beta)
         diff_signal = self.c_g(x - baseline)
@@ -1670,16 +1677,13 @@ def main() -> None:
             )
             # Log DG gate values if using DG attention
             if args.attn_variant == "dg" and step % (args.train_log_every * 5) == 0:
-                betas, gammas = [], []
+                betas = []
                 for i, block in enumerate(base_model.blocks):
                     attn = block.attn
                     if hasattr(attn, 'beta'):
                         betas.append(f"L{i}:{torch.sigmoid(attn.beta).item():.3f}")
-                    if hasattr(attn, 'gamma'):
-                        gammas.append(f"L{i}:{torch.sigmoid(attn.gamma).item():.3f}")
                 if betas:
                     log0(f"dg_beta(raw_vs_diff):[{','.join(betas)}]")
-                    log0(f"dg_gamma(local_vs_global):[{','.join(gammas)}]")
 
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         if distributed and max_wallclock_ms is not None:
