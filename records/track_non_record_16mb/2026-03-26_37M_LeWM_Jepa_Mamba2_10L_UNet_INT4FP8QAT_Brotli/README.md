@@ -1,6 +1,7 @@
 # To Jepa Or Not To Jepa: That is Le Question
-
 **JEPA + SIGReg + Mamba-2 SSM + U-Net Skips + INT4/FP8 QAT + Brotli Compression**
+
+A LeWorldModel implementation in combination with Mamba2 SSM and U-Nets to the text field, specifically for this challenge and its bpb evaluation. 
 
 | Config | Sliding BPB | Standard BPB | Artifact | Compute |
 |--------|-------------|-------------|----------|---------|
@@ -19,7 +20,7 @@
 3. [LeWorldModel Adaptation to Text](#leworldmodel-adaptation-to-text)
 4. [Training Pipeline](#training-pipeline)
 5. [Byte vs BPE Tokenization](#byte-vs-bpe-tokenization)
-6. [Experimental Results](#experimental-results)
+6. [Experimental Results from Ablations](#experimental-results-from-ablations)
 7. [Configuration Reference](#configuration-reference)
 8. [Setup and Run](#setup-and-run)
 
@@ -39,12 +40,7 @@ The hypothesis is that self-supervised latent prediction (JEPA) provides a compl
 
 ## Architecture
 
-```
- Tokens -> Embedding -> [Mamba-2 SSM + ReLU² MLP] × L (U-Net skips) -> RMSNorm -> h
-    JEPA branch:   h -> Projector -> z -> Predictor (autoregressive rollout) -> MSE loss
-    Decode branch: h -> [tied lm_head] -> logits -> CE loss + Z-loss
-    SIGReg:        z -> per-timestep Gaussian regularization
-```
+![personal_architecture](https://github.com/user-attachments/assets/16d5bc8b-ab1e-4ed1-b793-7b0780f98c45)
 
 ### Core Components
 
@@ -98,6 +94,8 @@ This halves MLP parameter cost while maintaining per-position nonlinearity every
 ---
 
 ## LeWorldModel Adaptation to Text
+
+![leworldmodel_paper_architecture](https://github.com/user-attachments/assets/860ff59b-68a2-46bf-a7e7-cff5ac37c486)
 
 This implementation adapts the LeWorldModel (Maes, Le Lidec, Scieur, LeCun, Balestriero, 2026) from robotics to text. The paper proposes JEPA + SIGReg as a two-term training objective for learning world models from video, replacing contrastive losses and EMA-based methods.
 
