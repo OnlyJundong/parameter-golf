@@ -120,6 +120,7 @@ class Hyperparameters:
     sliding_eval_stride = _e("SLIDING_EVAL_STRIDE", 16, int)
     sliding_batch_size = _e("SLIDING_BATCH_SIZE", 64, int)
     temp_scaling   = _e("TEMP_SCALING", 1, bool)
+    temp_calib     = _e("TEMP_CALIB", 0.0, float)   # 0 = grid-search, >0 = use this temperature directly
     compile_mode   = _e("COMPILE_MODE", "default")
     # Checkpoint
     checkpoint_every = _e("CHECKPOINT_EVERY", 0, int)   # 0 = disabled
@@ -1614,22 +1615,26 @@ def main() -> None:
                               val_tokens, bpe_luts=bpe_luts)
     log0(f"final_roundtrip val_loss:{q_loss:.4f} val_bpb:{q_bpb:.4f}")
 
-    # Temperature search (calibrate on TRAINING data, not validation)
+    # Temperature scaling through auto-calibration or fixed value
     opt_temp = 1.0
     if args.temp_scaling:
         torch.cuda.synchronize()
         t_temp = time.perf_counter()
-        # Take a small chunk of training data for calibration (same as ternary code)
-        calib_tokens = train_loader.stream.take(65536)
-        # Pad to seq_len alignment
-        u = ((calib_tokens.numel() - 1) // args.train_seq_len) * args.train_seq_len
-        calib_tokens = calib_tokens[:u + 1]
-        opt_temp = find_best_temperature(args, model, rank, world_size,
-                                         device, calib_tokens, bpe_luts=bpe_luts)
+        if args.temp_calib > 0:
+            opt_temp = args.temp_calib
+        else:
+            # Auto-calibrate on training data
+            calib_tokens = train_loader.stream.take(65536)
+            u = ((calib_tokens.numel() - 1) // args.train_seq_len) * args.train_seq_len
+            calib_tokens = calib_tokens[:u + 1]
+            opt_temp = find_best_temperature(args, model, rank, world_size,
+                                             device, calib_tokens, bpe_luts=bpe_luts)
         torch.cuda.synchronize()
         log0(f"temp_scaling optimal_T:{opt_temp:.2f} "
+             f"{'(manual)' if args.temp_calib > 0 else '(auto)'} "
              f"time:{1000.0 * (time.perf_counter() - t_temp):.0f}ms")
-        # Final eval with optimal temperature (on val data — this is the actual evaluation)
+        
+        # Final eval with optimal temperature
         t_loss, t_bpb = eval_val(args, model, rank, world_size, device,
                                   val_tokens, temperature=opt_temp, bpe_luts=bpe_luts)
         log0(f"final_temped val_loss:{t_loss:.4f} val_bpb:{t_bpb:.4f} T={opt_temp:.2f}")
