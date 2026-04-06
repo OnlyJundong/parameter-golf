@@ -4,7 +4,7 @@
 
 ## Summary
 
-This submission is a **non-record submission**. It extends the [20K scaling run](../2026-04-06_ExtendedCompute_20K_6hours_4xA100MIG_ScalingAnalysis/) to 50K steps (~12 hours), using the same architecture and code from ([PR #549](https://github.com/openai/parameter-golf/pull/549) by @abaybektursun). Training runs on 4×A100 MIG instances (approximately 10× slower per step than 8×H100 SXM).
+This submission is a **non-record submission**. It extends the [20K scaling run](https://github.com/openai/parameter-golf/pull/1407) to 50K steps (~12 hours), using the same architecture and code from ([PR #549](https://github.com/openai/parameter-golf/pull/549) by @abaybektursun). Training runs on 4×A100 MIG instances (approximately 10× slower per step than 8×H100 SXM).
 
 Key findings:
 - **50K steps achieves 1.0858 BPB post-TTT** (3-seed mean, std 0.0005) — improvement of **−0.0102 BPB** over the 20K run (1.0960)
