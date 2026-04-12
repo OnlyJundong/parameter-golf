@@ -159,9 +159,11 @@ def main():
     if not val_files:
         raise FileNotFoundError(f"No val files in {args.data_dir}")
     data = np.fromfile(val_files[0], dtype=np.uint16).astype(np.int32)
-    # Use first 8192 tokens
+    # Use first 8192 tokens, clamp to vocab size
     data = data[:8192]
-    print(f"Loaded {len(data)} tokens from {val_files[0]}")
+    vocab_size = mod.Hyperparameters.vocab_size
+    data = np.clip(data, 0, vocab_size - 1)
+    print(f"Loaded {len(data)} tokens from {val_files[0]} (clamped to vocab_size={vocab_size})")
 
     # Measure
     results = measure_variance_ratio(model, data, args.seq_len, device, args.model_type)
