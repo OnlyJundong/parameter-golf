@@ -27,10 +27,17 @@ def load_module_from_path(script_path: str, module_name: str = "train_mod"):
     return mod
 
 
-def build_model(mod, device):
-    """Build a model using the module's Hyperparameters and GPT class."""
+def build_model(mod, device, model_type):
+    """Build a model using the module's Hyperparameters and GPT class.
+
+    Inspects the GPT constructor to pass any extra kwargs the script version
+    accepts (e.g. attn_variant, bigram_vocab_size, latent_kv_dim).
+    """
+    import inspect
     args = mod.Hyperparameters
-    model = mod.GPT(
+
+    # Base kwargs every GPT version needs
+    kwargs = dict(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
         model_dim=args.model_dim,
@@ -42,7 +49,21 @@ def build_model(mod, device):
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=getattr(args, 'qk_gain_init', 1.5),
-    ).to(device)
+    )
+
+    # Check what extra params the GPT constructor accepts and pass them
+    sig = inspect.signature(mod.GPT.__init__)
+    extra_params = {
+        'attn_variant': model_type if model_type == 'dg' else 'standard',
+        'bigram_vocab_size': getattr(args, 'bigram_vocab_size', 0),
+        'bigram_dim': getattr(args, 'bigram_dim', 128),
+        'latent_kv_dim': getattr(args, 'latent_kv_dim', 64),
+    }
+    for name, value in extra_params.items():
+        if name in sig.parameters:
+            kwargs[name] = value
+
+    model = mod.GPT(**kwargs).to(device)
     return model
 
 
@@ -66,13 +87,17 @@ def measure_variance_ratio(model, data_tokens, seq_len, device, model_type):
         return hook_fn
 
     # Register hooks on the value/payload projection in each block
+    # Auto-detect: DG models have c_payload, standard models have c_v
     hooks = []
     for i, block in enumerate(model.blocks):
         attn = block.attn
-        if model_type == "standard":
-            h = attn.c_v.register_forward_hook(make_hook(i, "c_v"))
+        if hasattr(attn, 'c_payload'):
+            proj = attn.c_payload
+        elif hasattr(attn, 'c_v'):
+            proj = attn.c_v
         else:
-            h = attn.c_payload.register_forward_hook(make_hook(i, "c_payload"))
+            raise AttributeError(f"Block {i} attention has neither c_payload nor c_v")
+        h = proj.register_forward_hook(make_hook(i, type(attn).__name__))
         hooks.append(h)
 
     # Forward pass over data in chunks
@@ -148,7 +173,7 @@ def main():
     mod = load_module_from_path(args.script)
 
     # Build model and load checkpoint
-    model = build_model(mod, device)
+    model = build_model(mod, device, args.model_type)
     state_dict = torch.load(args.checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(state_dict, strict=True)
     print(f"Loaded {args.model_type} model from {args.checkpoint}")
