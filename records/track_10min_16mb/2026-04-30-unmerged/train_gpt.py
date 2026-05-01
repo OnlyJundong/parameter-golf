@@ -1876,9 +1876,7 @@ class Muon(torch.optim.Optimizer):
                 self._rs_futures.append(None)
                 continue
             pg = m["padded_grad"]
-            pg[: m["B"]].copy_(p.grad.bfloat16())
-            if pg.shape[0] > m["B"]:
-                pg[m["B"] :].zero_()
+            pg[: m["B"]].copy_(p.grad)
             fut = dist.reduce_scatter_tensor(
                 m["shard"], pg, op=dist.ReduceOp.AVG, async_op=True
             )
@@ -1912,7 +1910,7 @@ class Muon(torch.optim.Optimizer):
                     upd = prev_m["full_update"][: prev_m["B"]]
                     if wd > 0.0:
                         pp.data.mul_(1.0 - lr * wd)
-                    pp.add_(upd.to(dtype=pp.dtype), alpha=-lr * prev_m["scale"])
+                    pp.add_(upd, alpha=-lr * prev_m["scale"])
                 if sharded and self._rs_futures[idx] is not None:
                     self._rs_futures[idx].wait()
                     g = m["shard"]
@@ -1940,14 +1938,14 @@ class Muon(torch.optim.Optimizer):
                 else:
                     if wd > 0.0:
                         p.data.mul_(1.0 - lr * wd)
-                    p.add_(update.to(dtype=p.dtype), alpha=-lr * m["scale"])
+                    p.add_(update, alpha=-lr * m["scale"])
             if prev_ag_handle is not None:
                 prev_ag_handle.wait()
                 pp = prev_m["p"]
                 upd = prev_m["full_update"][: prev_m["B"]]
                 if wd > 0.0:
                     pp.data.mul_(1.0 - lr * wd)
-                pp.add_(upd.to(dtype=pp.dtype), alpha=-lr * prev_m["scale"])
+                pp.add_(upd, alpha=-lr * prev_m["scale"])
             if hasattr(self, "_rs_futures"):
                 del self._rs_futures
         return loss
@@ -3658,7 +3656,6 @@ def train_model(h, device, val_data):
 
     _clip_params = [p for p in base_model.parameters() if p.requires_grad]
     def step_fn(step, lr_scale):
-        optimizers.zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(h.grad_accum_steps):
             x, y, cu_seqlens, _max_seqlen = train_loader.next_batch(
